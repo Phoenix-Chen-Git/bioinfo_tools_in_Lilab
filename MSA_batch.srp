@@ -1,0 +1,88 @@
+#!/bin/bash
+#SBATCH -J MSA_f4w_custom
+#SBATCH -p cn_nl
+#SBATCH -N 1
+#SBATCH -o MSA%j.out
+#SBATCH -e MSA%j.err
+#SBATCH --no-requeue
+#SBATCH -A yulongli_g1
+#SBATCH --qos=yulonglicnnl
+#SBATCH --overcommit
+#SBATCH --mincpus=8
+
+
+uniref30DB=/home/yulongli_pkuhpc/lustre3/Uniref30/uniref30_2302_db
+
+# Check if a directory is provided
+if [ $# -eq 0 ]; then
+    echo "Usage: sbatch $0 <fasta_directory>"
+    exit 1
+fi
+
+INPUT_DIR=$1
+
+# Check if directory exists
+if [ ! -d "$INPUT_DIR" ]; then
+    echo "Error: Directory '$INPUT_DIR' not found!"
+    exit 1
+fi
+
+# Create Output Directory
+OUT_DIR="msa_result"
+mkdir -p "$OUT_DIR"
+
+# Create a temporary directory for this specific SLURM job
+JOB_TMP_DIR="mmseqs_tmp_${SLURM_JOB_ID}"
+mkdir -p "$JOB_TMP_DIR"
+
+echo "Starting batch processing..."
+echo "Input: $INPUT_DIR"
+echo "Output: $OUT_DIR"
+
+# Enable nullglob so that if *.fasta exists but *.fa doesn't, it doesn't break
+shopt -s nullglob
+
+# Loop through both .fa and .fasta files
+found_files=0
+for fasta_file in "${INPUT_DIR}"/*.fa "${INPUT_DIR}"/*.fasta; do
+    # Check if file exists (double check in case nullglob fails or dir is empty)
+    [ -e "$fasta_file" ] || continue
+    found_files=1
+
+    # Get filename and strip ANY extension (removes content after the last dot)
+    filename=$(basename -- "$fasta_file")
+    base_name="${filename%.*}"
+    
+    echo "Processing: $base_name (from $filename)"
+
+    # Define temp paths
+    qDB="${JOB_TMP_DIR}/${base_name}_queryDB"
+    rDB="${JOB_TMP_DIR}/${base_name}_resultDB"
+    mDB="${JOB_TMP_DIR}/${base_name}_msaDB"
+    mmseqs_tmp="${JOB_TMP_DIR}/tmp_${base_name}"
+
+    # Run MMseqs2 workflow (silencing stdout to keep logs clean)
+    mmseqs createdb "$fasta_file" "$qDB" > /dev/null
+    mmseqs search "$qDB" "$uniref30DB" "$rDB" "$mmseqs_tmp" --threads 20 -a > /dev/null
+    mmseqs result2msa "$qDB" "$uniref30DB" "$rDB" "$mDB" --threads 20 --msa-format-mode 5 > /dev/null
+
+    # Move result
+    cp "$mDB" "${OUT_DIR}/${base_name}.a3m"
+
+    # Clean null bytes
+    tr -d '\000' < "${OUT_DIR}/${base_name}.a3m" > "${OUT_DIR}/${base_name}.a3m.tmp"
+    mv "${OUT_DIR}/${base_name}.a3m.tmp" "${OUT_DIR}/${base_name}.a3m"
+
+    # Cleanup intermediate files for this sequence
+    rm -f "${qDB}"* "${rDB}"* "${mDB}"*
+    rm -rf "$mmseqs_tmp"
+done
+
+if [ $found_files -eq 0 ]; then
+    echo "WARNING: No .fa or .fasta files found in $INPUT_DIR"
+fi
+
+# Remove the main temporary directory
+rm -rf "$JOB_TMP_DIR"
+
+echo "All done. Results are in $OUT_DIR"
